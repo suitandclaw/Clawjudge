@@ -1,1 +1,1 @@
-web: cd api && npm install && npm start
+web: cd api && node minimal.js

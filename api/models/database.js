@@ -7,13 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
-const DB_PATH = process.env.CLAWJUDGE_DB || path.join(__dirname, '../../data/clawjudge.db');
-
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+const DB_PATH = process.env.CLAWJUDGE_DB || '/app/data/clawjudge.db';
 
 let db = null;
 
@@ -21,14 +15,27 @@ let db = null;
  * Initialize database connection and tables
  */
 async function initializeDatabase() {
+  // Ensure data directory exists at runtime
+  try {
+    const dataDir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+      console.log(`Created data directory: ${dataDir}`);
+    }
+  } catch (err) {
+    console.error('Failed to create data directory:', err);
+    // Continue anyway - might be a permissions issue we can work around
+  }
+  
   return new Promise((resolve, reject) => {
     db = new sqlite3.Database(DB_PATH, (err) => {
       if (err) {
+        console.error('Database connection error:', err);
         reject(err);
         return;
       }
       
-      console.log('Connected to SQLite database');
+      console.log('Connected to SQLite database at:', DB_PATH);
       createTables().then(resolve).catch(reject);
     });
   });

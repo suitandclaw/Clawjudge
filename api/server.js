@@ -96,15 +96,20 @@ app.use((req, res) => {
 // Initialize database and start server
 async function startServer() {
   try {
-    await initializeDatabase();
-    console.log('Database initialized');
+    console.log(`Starting ClawJudge API...`);
+    console.log(`PORT env: ${process.env.PORT || 'not set (using default)'}`);
+    console.log(`NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
     
-    app.listen(PORT, () => {
-      console.log(`ClawJudge API server running on port ${PORT}`);
-      console.log(`API docs: http://localhost:${PORT}/api/docs`);
+    await initializeDatabase();
+    console.log('Database initialized successfully');
+    
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`✓ ClawJudge API server running on 0.0.0.0:${PORT}`);
+      console.log(`✓ Health check: http://0.0.0.0:${PORT}/health`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
+    console.error(error.stack);
     process.exit(1);
   }
 }

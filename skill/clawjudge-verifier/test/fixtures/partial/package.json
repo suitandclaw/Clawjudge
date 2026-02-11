@@ -1,0 +1,13 @@
+{
+  "name": "partial-project",
+  "version": "1.0.0",
+  "description": "A project with partial compliance - some tests fail, coverage below threshold",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --coverage",
+    "build": "echo 'Build successful'"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  }
+}

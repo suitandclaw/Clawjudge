@@ -1,1 +1,1 @@
-web: cd api && node minimal.js
+web: node minimal.js

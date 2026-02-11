@@ -1,0 +1,12 @@
+{
+  "name": "clawjudge-verifier",
+  "version": "0.1.0",
+  "description": "Automated code and deliverable verification for bounty submissions. Run objective quality checks before approving work.",
+  "author": "SuitAndClaw",
+  "tags": ["verification", "bounty", "code-review", "security", "quality"],
+  "category": "developer-tools",
+  "openclaw": {
+    "os": ["darwin", "linux"],
+    "minVersion": "2026.2.0"
+  }
+}

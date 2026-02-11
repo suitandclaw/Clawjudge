@@ -4,7 +4,7 @@
  * Wraps the Phase 1 verifier with qualitative assessment.
  */
 
-const { verify } = require('../../skill/clawjudge-verifier/src/index');
+const { verify } = require('../skill/clawjudge-verifier/src/index');
 const { evaluateQualitative } = require('./qualitative/assessment');
 
 /**

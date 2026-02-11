@@ -5,7 +5,7 @@
  */
 
 const path = require('path');
-const { verify } = require('../../skill/clawjudge-verifier/src/index');
+const { verify } = require('../verifier/src/index');
 const { Verification } = require('../models/database');
 
 /**

@@ -1,0 +1,38 @@
+{
+  "name": "clawjudge-verifier",
+  "version": "0.1.0",
+  "description": "Automated code and deliverable verification for bounty submissions",
+  "main": "src/index.js",
+  "bin": {
+    "clawjudge-verifier": "./src/cli.js"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/",
+    "compile": "echo 'No compile step needed'"
+  },
+  "keywords": [
+    "verification",
+    "bounty",
+    "code-review",
+    "security",
+    "clawjudge",
+    "openclaw-skill"
+  ],
+  "author": "SuitAndClaw",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.0.0",
+    "simple-git": "^3.19.1",
+    "tmp": "^0.2.1",
+    "fs-extra": "^11.1.1"
+  },
+  "devDependencies": {
+    "jest": "^29.6.2",
+    "eslint": "^8.46.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

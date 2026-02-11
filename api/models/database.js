@@ -15,29 +15,40 @@ let db = null;
  * Initialize database connection and tables
  */
 async function initializeDatabase() {
+  console.log('[DB] Initializing database at:', DB_PATH);
+  
   // Ensure data directory exists at runtime
   try {
     const dataDir = path.dirname(DB_PATH);
+    console.log('[DB] Checking data directory:', dataDir);
     if (!fs.existsSync(dataDir)) {
+      console.log('[DB] Creating data directory...');
       fs.mkdirSync(dataDir, { recursive: true });
-      console.log(`Created data directory: ${dataDir}`);
+      console.log('[DB] Created data directory:', dataDir);
+    } else {
+      console.log('[DB] Data directory exists');
     }
   } catch (err) {
-    console.error('Failed to create data directory:', err);
+    console.error('[DB] Failed to create data directory:', err);
     // Continue anyway - might be a permissions issue we can work around
   }
   
   return new Promise((resolve, reject) => {
-    db = new sqlite3.Database(DB_PATH, (err) => {
-      if (err) {
-        console.error('Database connection error:', err);
-        reject(err);
-        return;
-      }
-      
-      console.log('Connected to SQLite database at:', DB_PATH);
-      createTables().then(resolve).catch(reject);
-    });
+    try {
+      db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
+        if (err) {
+          console.error('[DB] Database connection error:', err);
+          reject(err);
+          return;
+        }
+        
+        console.log('[DB] Connected to SQLite database at:', DB_PATH);
+        createTables().then(resolve).catch(reject);
+      });
+    } catch (err) {
+      console.error('[DB] Exception creating database:', err);
+      reject(err);
+    }
   });
 }
 

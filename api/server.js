@@ -93,22 +93,41 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
+// Process error handlers
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
 // Initialize database and start server
 async function startServer() {
   try {
-    console.log(`Starting ClawJudge API...`);
-    console.log(`PORT env: ${process.env.PORT || 'not set (using default)'}`);
-    console.log(`NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
+    console.log(`[STARTUP] ClawJudge API starting...`);
+    console.log(`[STARTUP] PORT env: ${process.env.PORT || 'not set (using 3000)'}`);
+    console.log(`[STARTUP] NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
+    console.log(`[STARTUP] CWD: ${process.cwd()}`);
     
     await initializeDatabase();
-    console.log('Database initialized successfully');
+    console.log('[STARTUP] Database initialized successfully');
     
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`✓ ClawJudge API server running on 0.0.0.0:${PORT}`);
-      console.log(`✓ Health check: http://0.0.0.0:${PORT}/health`);
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[STARTUP] ✓ ClawJudge API server running on 0.0.0.0:${PORT}`);
+      console.log(`[STARTUP] ✓ Health check: http://0.0.0.0:${PORT}/health`);
     });
+    
+    // Keep the process alive
+    server.on('error', (err) => {
+      console.error('[SERVER ERROR]', err);
+      process.exit(1);
+    });
+    
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('[STARTUP ERROR] Failed to start server:', error);
     console.error(error.stack);
     process.exit(1);
   }

@@ -1,0 +1,13 @@
+{
+  "name": "passing-project",
+  "version": "1.0.0",
+  "description": "A project that passes all checks",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "build": "echo 'Build successful'"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  }
+}

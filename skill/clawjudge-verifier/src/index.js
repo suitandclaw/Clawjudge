@@ -1,458 +1,218 @@
-#!/usr/bin/env node
 /**
- * ClawJudge Verifier Skill
- * Automated code verification for bounty submissions
+ * ClawJudge Verifier - Main Entry Point
+ * 
+ * Automated code and deliverable verification for bounty submissions.
  */
 
-const { execSync } = require('child_process');
-const fs = require('fs-extra');
 const path = require('path');
+const fs = require('fs-extra');
 const tmp = require('tmp');
 const simpleGit = require('simple-git');
-const { glob } = require('glob');
 
-// Configuration
-const CONFIG = {
-  TIMEOUT: 30000, // 30 seconds per check
-  COVERAGE_THRESHOLD: 70,
-  SUPPORTED_LANGUAGES: ['javascript', 'typescript', 'python', 'solidity']
+const { detectLanguage } = require('./evaluators/code');
+const { runCompilationCheck } = require('./checks/compile');
+const { runTestCheck } = require('./checks/tests');
+const { runLintCheck } = require('./checks/lint');
+const { runSecurityCheck } = require('./checks/security');
+const { runCoverageCheck } = require('./checks/coverage');
+const { matchRequirements } = require('./evaluators/content');
+const { generateVerdict } = require('./verdict');
+
+// Default configuration
+const DEFAULT_CONFIG = {
+  timeout: parseInt(process.env.CLAWJUDGE_TIMEOUT) || 180,
+  coverageThreshold: parseInt(process.env.CLAWJUDGE_COVERAGE_MIN) || 70,
+  verbose: process.env.CLAWJUDGE_VERBOSE === 'true',
+  tempDir: process.env.CLAWJUDGE_TEMP_DIR || tmp.tmpdir
 };
 
 /**
- * Main entry point
+ * Main verification function
+ * @param {Object} options - Verification options
+ * @param {string} options.submission - GitHub URL, file path, or inline code
+ * @param {string[]} options.requirements - Array of requirement strings
+ * @param {string} options.bounty_type - Type of bounty (code, data, content)
+ * @param {string} options.language - Language override (auto, nodejs, python, solidity)
+ * @param {number} options.coverage_threshold - Coverage threshold percentage
+ * @param {number} options.timeout - Timeout in seconds
+ * @returns {Promise<Object>} Verdict object
  */
-async function verify(submissionUrl, requirements, bountyType = 'code') {
-  const tempDir = tmp.dirSync({ unsafeCleanup: true });
+async function verify(options) {
+  const startTime = Date.now();
+  const config = { ...DEFAULT_CONFIG, ...options };
+  
+  let tempDir = null;
+  let projectPath = null;
   
   try {
-    // Clone repo
-    console.log(`Cloning ${submissionUrl}...`);
-    await simpleGit().clone(submissionUrl, tempDir.name, ['--depth', '1']);
+    // Step 1: Prepare submission
+    const prepResult = await prepareSubmission(options.submission, config);
+    projectPath = prepResult.path;
+    tempDir = prepResult.tempDir;
     
-    // Detect language
-    const language = await detectLanguage(tempDir.name);
-    console.log(`Detected language: ${language}`);
+    // Step 2: Detect language
+    const language = options.language === 'auto' || !options.language
+      ? detectLanguage(projectPath)
+      : options.language;
     
-    // Run checks based on bounty type
-    let result;
-    if (bountyType === 'code') {
-      result = await verifyCode(tempDir.name, language, requirements);
-    } else if (bountyType === 'data') {
-      result = await verifyData(tempDir.name, requirements);
-    } else {
-      result = await verifyContent(tempDir.name, requirements);
+    if (!language) {
+      return {
+        verdict: 'ERROR',
+        score: 0,
+        error: 'Could not detect project language. Please specify explicitly.',
+        checks: {},
+        reasoning: 'Language detection failed. No package.json, requirements.txt, or .sol files found.',
+        recommendation: 'Specify language explicitly or ensure project has standard config files.'
+      };
     }
     
-    return formatVerdict(result, requirements);
+    // Step 3: Run all checks
+    const checkTimeout = Math.floor(config.timeout / 5); // Divide timeout among checks
+    
+    const [
+      compilationResult,
+      testResult,
+      lintResult,
+      securityResult,
+      coverageResult
+    ] = await Promise.all([
+      runWithTimeout(runCompilationCheck(projectPath, language), checkTimeout, 'compilation'),
+      runWithTimeout(runTestCheck(projectPath, language), checkTimeout, 'tests'),
+      runWithTimeout(runLintCheck(projectPath, language), checkTimeout, 'linting'),
+      runWithTimeout(runSecurityCheck(projectPath, language), checkTimeout, 'security'),
+      runWithTimeout(runCoverageCheck(projectPath, language, config.coverageThreshold), checkTimeout, 'coverage')
+    ]);
+    
+    // Step 4: Match requirements (uses LLM for subjective evaluation)
+    const requirementsResult = await matchRequirements(
+      projectPath,
+      options.requirements || [],
+      language
+    );
+    
+    // Step 5: Generate verdict
+    const verdict = generateVerdict({
+      compilation: compilationResult,
+      tests: testResult,
+      lint: lintResult,
+      security: securityResult,
+      coverage: coverageResult,
+      requirements: requirementsResult
+    }, config);
+    
+    verdict.metadata = {
+      duration: Date.now() - startTime,
+      language,
+      timestamp: new Date().toISOString()
+    };
+    
+    return verdict;
     
   } catch (error) {
     return {
-      verdict: 'FAIL',
+      verdict: 'ERROR',
       score: 0,
       error: error.message,
-      checks: {}
+      checks: {},
+      reasoning: `Verification failed with error: ${error.message}`,
+      recommendation: 'Check submission format and try again. Ensure repository is accessible.'
     };
   } finally {
-    tempDir.removeCallback();
-  }
-}
-
-/**
- * Detect project language
- */
-async function detectLanguage(repoPath) {
-  // Check for package.json (Node.js)
-  if (await fs.pathExists(path.join(repoPath, 'package.json'))) {
-    const pkg = await fs.readJson(path.join(repoPath, 'package.json'));
-    // Check for TypeScript
-    const hasTsConfig = await fs.pathExists(path.join(repoPath, 'tsconfig.json'));
-    const hasTsFiles = (await glob('**/*.ts', { cwd: repoPath })).length > 0;
-    
-    if (hasTsConfig || hasTsFiles) return 'typescript';
-    return 'javascript';
-  }
-  
-  // Check for Python
-  if (await fs.pathExists(path.join(repoPath, 'requirements.txt')) ||
-      await fs.pathExists(path.join(repoPath, 'pyproject.toml')) ||
-      (await glob('**/*.py', { cwd: repoPath })).length > 0) {
-    return 'python';
-  }
-  
-  // Check for Solidity
-  if ((await glob('**/*.sol', { cwd: repoPath })).length > 0) {
-    return 'solidity';
-  }
-  
-  return 'unknown';
-}
-
-/**
- * Verify code bounty
- */
-async function verifyCode(repoPath, language, requirements) {
-  const checks = {
-    compilation: { passed: false, details: '' },
-    tests: { passed: false, total: 0, passing: 0, failing: 0, details: '' },
-    coverage: { percentage: 0, threshold: CONFIG.COVERAGE_THRESHOLD, passed: false },
-    linting: { passed: false, errors: 0, warnings: 0, details: [] },
-    security: { vulnerabilities: 0, warnings: 0, details: [] },
-    requirements: {}
-  };
-  
-  // Compilation check
-  checks.compilation = await checkCompilation(repoPath, language);
-  
-  // Test check (only if compilation passed)
-  if (checks.compilation.passed) {
-    checks.tests = await checkTests(repoPath, language);
-  }
-  
-  // Coverage check
-  checks.coverage = await checkCoverage(repoPath, language);
-  
-  // Security check
-  checks.security = await checkSecurity(repoPath, language);
-  
-  // Requirements matching (simplified - checks for keywords in files)
-  checks.requirements = await checkRequirements(repoPath, requirements);
-  
-  // Calculate score
-  const score = calculateScore(checks);
-  
-  // Determine verdict
-  let verdict = 'FAIL';
-  if (score >= 90 && checks.compilation.passed && checks.security.vulnerabilities === 0) {
-    verdict = 'PASS';
-  } else if (score >= 60 && checks.compilation.passed) {
-    verdict = 'PARTIAL';
-  }
-  
-  return {
-    verdict,
-    score,
-    checks
-  };
-}
-
-/**
- * Check if code compiles
- */
-async function checkCompilation(repoPath, language) {
-  try {
-    if (language === 'javascript' || language === 'typescript') {
-      // Check for build script
-      const pkg = await fs.readJson(path.join(repoPath, 'package.json'));
-      
-      if (pkg.scripts?.build) {
-        execSync('npm run build', { 
-          cwd: repoPath, 
-          timeout: CONFIG.TIMEOUT,
-          stdio: 'pipe'
-        });
-      } else {
-        // Try to at least parse the files
-        const files = await glob('**/*.{js,ts}', { cwd: repoPath, ignore: 'node_modules/**' });
-        for (const file of files.slice(0, 10)) { // Check first 10 files
-          require('fs').readFileSync(path.join(repoPath, file), 'utf8');
-        }
-      }
-      
-      return { passed: true, details: 'Compiled successfully' };
-      
-    } else if (language === 'python') {
-      // Check Python syntax
-      const files = await glob('**/*.py', { cwd: repoPath });
-      for (const file of files.slice(0, 10)) {
-        execSync(`python3 -m py_compile ${file}`, { cwd: repoPath, timeout: 5000 });
-      }
-      return { passed: true, details: 'Python syntax valid' };
-      
-    } else if (language === 'solidity') {
-      // Check if solc is available
+    // Cleanup temp directory
+    if (tempDir) {
       try {
-        execSync('solc --version', { timeout: 5000 });
-        return { passed: true, details: 'Solidity files present (compilation requires manual verification)' };
-      } catch {
-        return { passed: false, details: 'Solidity compiler not available' };
+        await fs.remove(tempDir);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+  }
+}
+
+/**
+ * Prepare submission for verification
+ * @param {string} submission - GitHub URL, file path, or inline code
+ * @param {Object} config - Configuration
+ * @returns {Promise<{path: string, tempDir: string|null}>}
+ */
+async function prepareSubmission(submission, config) {
+  // GitHub URL
+  if (submission.includes('github.com') || submission.includes('gitlab.com')) {
+    const tempDir = tmp.dirSync({ dir: config.tempDir, unsafeCleanup: true }).name;
+    const git = simpleGit(tempDir);
+    
+    // Handle different GitHub URL formats
+    let repoUrl = submission;
+    if (submission.includes('github.com') && !submission.endsWith('.git')) {
+      repoUrl = submission.replace(/\/+$/, '') + '.git';
+    }
+    
+    await git.clone(repoUrl, tempDir, ['--depth', '1']);
+    
+    // Find the actual project directory (might be nested)
+    const entries = await fs.readdir(tempDir);
+    const subdirs = [];
+    for (const entry of entries) {
+      const fullPath = path.join(tempDir, entry);
+      const stat = await fs.stat(fullPath);
+      if (stat.isDirectory() && !entry.startsWith('.')) {
+        subdirs.push(fullPath);
       }
     }
     
-    return { passed: false, details: 'Unknown language' };
-    
-  } catch (error) {
-    return { 
-      passed: false, 
-      details: error.message || 'Compilation failed'
-    };
-  }
-}
-
-/**
- * Check for tests
- */
-async function checkTests(repoPath, language) {
-  try {
-    if (language === 'javascript' || language === 'typescript') {
-      const pkg = await fs.readJson(path.join(repoPath, 'package.json'));
-      
-      if (!pkg.scripts?.test) {
-        return { passed: false, total: 0, passing: 0, failing: 0, details: 'No test script found' };
-      }
-      
-      try {
-        const output = execSync('npm test -- --json --silent 2>/dev/null || npm test', { 
-          cwd: repoPath, 
-          timeout: CONFIG.TIMEOUT,
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe']
-        });
-        
-        // Try to parse JSON output
-        const jsonMatch = output.match(/\{[\s\S]*"numTotalTests"[\s\S]*\}/);
-        if (jsonMatch) {
-          const result = JSON.parse(jsonMatch[0]);
-          return {
-            passed: result.numFailedTests === 0,
-            total: result.numTotalTests,
-            passing: result.numPassedTests,
-            failing: result.numFailedTests,
-            details: `${result.numPassedTests}/${result.numTotalTests} tests passing`
-          };
-        }
-        
-        // Fallback: check if "pass" or "fail" in output
-        const hasPass = output.includes('pass');
-        const hasFail = output.includes('fail');
-        return {
-          passed: hasPass && !hasFail,
-          total: 0,
-          passing: hasPass ? 1 : 0,
-          failing: hasFail ? 1 : 0,
-          details: 'Test execution completed'
-        };
-        
-      } catch (error) {
-        return {
-          passed: false,
-          total: 0,
-          passing: 0,
-          failing: 0,
-          details: 'Test execution failed: ' + error.message
-        };
-      }
-      
-    } else if (language === 'python') {
-      // Check for pytest
-      try {
-        const output = execSync('python3 -m pytest --tb=no -q 2>&1 || true', {
-          cwd: repoPath,
-          timeout: CONFIG.TIMEOUT,
-          encoding: 'utf8'
-        });
-        
-        const match = output.match(/(\d+) passed/);
-        const failMatch = output.match(/(\d+) failed/);
-        
-        const passing = match ? parseInt(match[1]) : 0;
-        const failing = failMatch ? parseInt(failMatch[1]) : 0;
-        
-        return {
-          passed: failing === 0 && passing > 0,
-          total: passing + failing,
-          passing,
-          failing,
-          details: `${passing} passed, ${failing} failed`
-        };
-      } catch {
-        return { passed: false, total: 0, passing: 0, failing: 0, details: 'No tests found' };
+    // If only one subdirectory and it looks like a project, use it
+    if (subdirs.length === 1) {
+      const hasPackageJson = await fs.pathExists(path.join(subdirs[0], 'package.json'));
+      const hasRequirements = await fs.pathExists(path.join(subdirs[0], 'requirements.txt'));
+      if (hasPackageJson || hasRequirements) {
+        return { path: subdirs[0], tempDir };
       }
     }
     
-    return { passed: false, total: 0, passing: 0, failing: 0, details: 'Test detection not implemented for ' + language };
-    
-  } catch (error) {
-    return { passed: false, total: 0, passing: 0, failing: 0, details: error.message };
+    return { path: tempDir, tempDir };
   }
-}
-
-/**
- * Check coverage
- */
-async function checkCoverage(repoPath, language) {
-  // Simplified: assume coverage is good if tests pass
-  // Real implementation would parse coverage reports
-  return {
-    percentage: 75, // Placeholder
-    threshold: CONFIG.COVERAGE_THRESHOLD,
-    passed: true,
-    details: 'Coverage check (simplified)'
-  };
-}
-
-/**
- * Check security
- */
-async function checkSecurity(repoPath, language) {
-  try {
-    if (language === 'javascript' || language === 'typescript') {
-      try {
-        const output = execSync('npm audit --json 2>/dev/null || npm audit', {
-          cwd: repoPath,
-          timeout: 20000,
-          encoding: 'utf8'
-        });
-        
-        try {
-          const audit = JSON.parse(output);
-          const vulns = audit.metadata?.vulnerabilities || {};
-          const total = (vulns.critical || 0) + (vulns.high || 0) + (vulns.moderate || 0) + (vulns.low || 0);
-          
-          return {
-            vulnerabilities: total,
-            warnings: vulns.moderate || 0,
-            details: [`${total} vulnerabilities found`, `${vulns.critical || 0} critical, ${vulns.high || 0} high`]
-          };
-        } catch {
-          return { vulnerabilities: 0, warnings: 0, details: ['Audit completed'] };
-        }
-      } catch (error) {
-        return { vulnerabilities: 0, warnings: 1, details: ['npm audit unavailable'] };
-      }
+  
+  // Local file path
+  if (await fs.pathExists(submission)) {
+    const stat = await fs.stat(submission);
+    if (stat.isDirectory()) {
+      return { path: submission, tempDir: null };
     }
-    
-    return { vulnerabilities: 0, warnings: 0, details: ['Security check not implemented for ' + language] };
-    
-  } catch (error) {
-    return { vulnerabilities: 0, warnings: 1, details: ['Security check failed: ' + error.message] };
+    // Single file - create temp dir and copy
+    const tempDir = tmp.dirSync({ dir: config.tempDir, unsafeCleanup: true }).name;
+    await fs.copy(submission, path.join(tempDir, path.basename(submission)));
+    return { path: tempDir, tempDir };
   }
+  
+  // Inline code - write to temp file
+  const tempDir = tmp.dirSync({ dir: config.tempDir, unsafeCleanup: true }).name;
+  await fs.writeFile(path.join(tempDir, 'submission.js'), submission);
+  return { path: tempDir, tempDir };
 }
 
 /**
- * Check requirements against code
+ * Run a function with timeout
+ * @param {Promise} promise - Promise to run
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @param {string} checkName - Name of check for error message
+ * @returns {Promise<Object>}
  */
-async function checkRequirements(repoPath, requirements) {
-  const results = {};
-  const files = await glob('**/*.{js,ts,py,sol,md}', { cwd: repoPath, ignore: 'node_modules/**' });
-  const allContent = files.slice(0, 20).map(f => {
-    try {
-      return require('fs').readFileSync(path.join(repoPath, f), 'utf8');
-    } catch {
-      return '';
-    }
-  }).join('\n').toLowerCase();
+async function runWithTimeout(promise, timeoutSec, checkName) {
+  const timeoutMs = timeoutSec * 1000;
   
-  for (const req of requirements) {
-    const reqLower = req.toLowerCase();
-    // Simple keyword matching
-    const keywords = reqLower.split(' ').filter(w => w.length > 3);
-    const matches = keywords.filter(kw => allContent.includes(kw)).length;
-    results[req] = matches > 0;
-  }
-  
-  return results;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`${checkName} timed out after ${timeoutSec}s`)), timeoutMs)
+    )
+  ]).catch(error => ({
+    passed: false,
+    error: error.message,
+    details: `${checkName} check failed: ${error.message}`
+  }));
 }
 
-/**
- * Calculate overall score
- */
-function calculateScore(checks) {
-  let score = 0;
-  
-  // Compilation: 30%
-  if (checks.compilation.passed) score += 30;
-  
-  // Tests: 30%
-  if (checks.tests.total > 0) {
-    const testScore = (checks.tests.passing / checks.tests.total) * 30;
-    score += testScore;
-  } else {
-    score += 15; // Partial credit if no tests
-  }
-  
-  // Coverage: 15%
-  if (checks.coverage.passed) score += 15;
-  
-  // Requirements: 25%
-  const reqMet = Object.values(checks.requirements).filter(Boolean).length;
-  const totalReqs = Object.keys(checks.requirements).length;
-  if (totalReqs > 0) {
-    score += (reqMet / totalReqs) * 25;
-  }
-  
-  return Math.round(score);
-}
-
-/**
- * Format final verdict
- */
-function formatVerdict(result, requirements) {
-  const { verdict, score, checks } = result;
-  
-  const reqMet = Object.values(checks.requirements).filter(Boolean).length;
-  const totalReqs = Object.keys(checks.requirements).length;
-  
-  return {
-    verdict,
-    score,
-    checks,
-    reasoning: `Code ${checks.compilation.passed ? 'compiles' : 'fails compilation'}. ${checks.tests.passing}/${checks.tests.total} tests pass. ${reqMet}/${totalReqs} requirements met.`,
-    recommendation: verdict === 'PASS' 
-      ? 'Full release recommended'
-      : verdict === 'PARTIAL'
-      ? `Partial release at ${score}% recommended`
-      : 'Reject — address issues and resubmit'
-  };
-}
-
-/**
- * Verify data bounty
- */
-async function verifyData(repoPath, requirements) {
-  // TODO: Implement data verification (CSV, JSON validation)
-  return {
-    verdict: 'FAIL',
-    score: 0,
-    checks: {},
-    reasoning: 'Data verification not yet implemented in v0.1.0'
-  };
-}
-
-/**
- * Verify content bounty
- */
-async function verifyContent(repoPath, requirements) {
-  // TODO: Implement content verification
-  return {
-    verdict: 'FAIL',
-    score: 0,
-    checks: {},
-    reasoning: 'Content verification not yet implemented in v0.1.0'
-  };
-}
-
-// Export for use as module
-module.exports = { verify, detectLanguage };
-
-// CLI entry point
-if (require.main === module) {
-  const args = process.argv.slice(2);
-  
-  if (args.length < 2) {
-    console.log('Usage: clawjudge-verifier <repo-url> <requirements>');
-    console.log('Example: clawjudge-verifier https://github.com/user/project "API,Auth,Tests"');
-    process.exit(1);
-  }
-  
-  const repoUrl = args[0];
-  const requirements = args[1].split(',').map(r => r.trim());
-  
-  verify(repoUrl, requirements)
-    .then(result => {
-      console.log(JSON.stringify(result, null, 2));
-    })
-    .catch(error => {
-      console.error('Error:', error.message);
-      process.exit(1);
-    });
-}
+module.exports = {
+  verify,
+  DEFAULT_CONFIG
+};
